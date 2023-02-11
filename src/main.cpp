@@ -1,8 +1,20 @@
 #define GLEW_STATIC
 #define GLFW_INCLUDE_NONE
 
+
+
+
 #include <Gl/glew.h>
 #include <GLFW/glfw3.h>
+
+
+
+
+
+
+
+
+
 
 struct WindowAttributes
 {
@@ -13,8 +25,8 @@ struct WindowAttributes
 
 void windowCloseFun(GLFWwindow* window)
 {
-	std::cout << "Destroying window\n";
 	glfwDestroyWindow(window);
+	LOG_INFO("Destroyed window")
 }
 
 

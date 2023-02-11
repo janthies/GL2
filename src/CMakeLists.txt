@@ -3,6 +3,8 @@ add_executable(
     main.cpp
     include/Test.h
     include/Pch.h
+    include/Logger.h
+    Logger.cpp
 )
 
 set_property(TARGET main PROPERTY CXX_STANDARD 17)
