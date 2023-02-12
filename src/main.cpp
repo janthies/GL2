@@ -12,11 +12,43 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+void DebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
+{
+	switch (severity)
+	{
+	case GL_DEBUG_SEVERITY_HIGH:
+		LOG_ERROR("GL_SEVERITY_HIGH")
+			break;
+
+	case GL_DEBUG_SEVERITY_MEDIUM:
+		LOG_WARN("GL_SEVERITY_MEDIUM")
+			break;
+
+	case GL_DEBUG_SEVERITY_LOW:
+		LOG_INFO("GL_SEVERITY_LOW")
+			break;
+
+	case GL_DEBUG_SEVERITY_NOTIFICATION:
+		LOG_DEBUG("GL_SEVERITY_NOTIFICATION")
+			break;
+	}
+
+	LOG_DEBUG("GL_SOURCE: %u", source)
+		LOG_DEBUG("GL_TYPE: %u", type)
+		LOG_DEBUG("GL_ID: %u", id)
+		LOG_DEBUG("GL_MESSAGE: %s", message)
+
+
+}
+
+
 class Camera;
+class GeometryManager;
 
 struct SharedContext
 {
 	Camera* worldCamera;
+	GeometryManager* geometryManager;
 };
 
 class Camera
@@ -163,7 +195,8 @@ public:
 	{
 		m_Rotation += angles;
 		m_Rotation.x = std::clamp(m_Rotation.x, -89.f, 89.f);
-		
+
+		LOG_INFO("%f, %f, %f", m_Rotation.x,m_Rotation.y, m_Rotation.z)
 		m_ViewIsDirty = true;
 	}
 
@@ -225,8 +258,8 @@ typedef uint32_t GeoID;
 struct Geometry
 {
 	GLsizei elementCount;
-	size_t firstElement;
-	size_t baseVertex;
+	GLuint firstIndex;
+	GLint baseVertex;
 
 };
 
@@ -238,6 +271,7 @@ public:
 		, m_ElementBuffer(0)
 		, m_VertexBufferTop(0)
 		, m_ElementBufferTop(0)
+		, m_Indices(0)
 		, m_NextID(1)
 	{
 		glCreateBuffers(1, &m_VertexBuffer);
@@ -253,6 +287,8 @@ public:
 		// delete buffers
 	}
 
+	// TODO Rausfinden was baseVertex und firstIndex sind
+
 	void AddGeometry(const std::string& name, void* vertexData, GLsizeiptr bytes, uint32_t* elementData, uint32_t elementCount)
 	{
 		assert(m_VertexBufferTop + bytes < VERTEX_BUFFER_SIZE);
@@ -260,9 +296,11 @@ public:
 
 		Geometry& geometry = m_Geometry[m_NextID];
 		geometry.elementCount = elementCount;
-		geometry.firstElement = m_ElementBufferTop / 4;
-		geometry.baseVertex = m_VertexBufferTop;
+		geometry.firstIndex = m_Indices;
+		geometry.baseVertex = (GLint)m_VertexBufferTop / 4;
 
+
+		m_Indices += elementCount;
 
 		glNamedBufferSubData(m_VertexBuffer, m_VertexBufferTop, bytes, vertexData);
 		m_VertexBufferTop += bytes;
@@ -272,6 +310,16 @@ public:
 
 		assert(m_NameToGeoID.find(name) == m_NameToGeoID.end());
 		m_NameToGeoID[name] = m_NextID++;
+	}
+
+	GLuint GetVertexBufferID()
+	{
+		return m_VertexBuffer;
+	}
+
+	GLuint GetElementBufferID()
+	{
+		return m_ElementBuffer;
 	}
 
 	GeoID GetID(const std::string name)
@@ -297,7 +345,7 @@ private:
 
 	GLintptr m_VertexBufferTop;
 	GLintptr m_ElementBufferTop;
-	
+	GLuint m_Indices;
 
 	GeoID m_NextID;
 
@@ -312,24 +360,192 @@ struct Renderable
 	glm::mat4 modelTransform;
 };
 
+
+struct InstanceData
+{
+	glm::mat4 modelTransform = glm::mat4(1.f);
+};
+
+struct DrawData
+{
+	GeoID geoID;
+	uint32_t instanceCount;
+	std::vector<InstanceData> instanceData;
+};
+
+struct DrawCommand
+{
+	GLuint elementCount;
+	GLuint instanceCount;
+	GLuint firstIndex;
+	GLint baseVertex;
+	GLuint baseInstance;
+};
+
+#define INSTANCE_BUFFER_DATA_SIZE 1024 * 1024 // 1mb
+
 class Renderer
 {
 public:
+	Renderer()
+		: m_VertexArray(0)
+		, m_InstanceDataBuffer(0)
+		, m_InstanceDataBufferTop(0)
+	{
+		glCreateVertexArrays(1, &m_VertexArray);
+		glCreateBuffers(1, &m_InstanceDataBuffer);
+		glNamedBufferData(m_InstanceDataBuffer, INSTANCE_BUFFER_DATA_SIZE, nullptr, GL_DYNAMIC_DRAW);
+
+
+		// Bind buffer to binding point 1
+		glVertexArrayVertexBuffer(m_VertexArray, 1, m_InstanceDataBuffer, 0, 64);
+
+		// Enable attribute indices
+		glEnableVertexArrayAttrib(m_VertexArray, 1);
+		glEnableVertexArrayAttrib(m_VertexArray, 2);
+		glEnableVertexArrayAttrib(m_VertexArray, 3);
+		glEnableVertexArrayAttrib(m_VertexArray, 4);
+
+		// Associate Binding Index with attribute indices
+		glVertexArrayAttribBinding(m_VertexArray, 1, 1);
+		glVertexArrayAttribBinding(m_VertexArray, 2, 1);
+		glVertexArrayAttribBinding(m_VertexArray, 3, 1);
+		glVertexArrayAttribBinding(m_VertexArray, 4, 1);
+
+		// Specify layout of data for attribute indices
+		glVertexArrayAttribFormat(m_VertexArray, 1, 4, GL_FLOAT, GL_FALSE, 0);
+		glVertexArrayAttribFormat(m_VertexArray, 2, 4, GL_FLOAT, GL_FALSE, 16);
+		glVertexArrayAttribFormat(m_VertexArray, 3, 4, GL_FLOAT, GL_FALSE, 32);
+		glVertexArrayAttribFormat(m_VertexArray, 4, 4, GL_FLOAT, GL_FALSE, 48);
+
+		// Specify Divisor for Binding Index
+		glVertexArrayBindingDivisor(m_VertexArray, 1, 1);
+
+		LOG_INFO("Renderer initialized InstanceDataBuffer")
+
+		glCreateBuffers(1, &m_DrawIndirectBuffer);
+		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_DrawIndirectBuffer);
+
+	}
+
+	~Renderer()
+	{
+
+	}
+
+	void SetVertexBuffer(GLuint vertexBufferID)
+	{
+		LOG_INFO("Set vertex buffer for renderer")
+		glEnableVertexArrayAttrib(m_VertexArray, 0);
+		glVertexArrayVertexBuffer(m_VertexArray, 0, vertexBufferID, 0, sizeof(float) * 3);
+		glVertexArrayAttribFormat(m_VertexArray, 0, 3, GL_FLOAT, GL_FALSE, 0);
+
+
+	}
+
+	void SetElementBuffer(GLuint elementBufferID)
+	{
+		LOG_INFO("Set element buffer for renderer")
+		glVertexArrayElementBuffer(m_VertexArray, elementBufferID);
+	}
+
 	void BeginScene()
 	{
 	}
 
 	void Submit(const Renderable& renderable)
 	{
+		// Find DrawData entry for current geoID
+		uint32_t drawDataPos = 0;
+		while(drawDataPos < m_DrawData.size())
+		{
+			if(m_DrawData[drawDataPos].geoID == renderable.geoID)
+			{
+				break;
+			}
+
+			drawDataPos++;
+		}
+
+		// Create new entry if no DrawData entry exists for current geoID
+		if(drawDataPos >= m_DrawData.size())
+		{
+			DrawData drawData{};
+			drawData.geoID = renderable.geoID;
+			m_DrawData.push_back(drawData);
+		}
+
+		// Update DrawData entry
+		DrawData& drawData = m_DrawData[drawDataPos];
+		drawData.instanceCount++;
+		InstanceData instanceData;
+		instanceData.modelTransform = renderable.modelTransform;
+		drawData.instanceData.push_back(instanceData);
 	}
 
-	void EndScene()
+	void EndScene(GLFWwindow* window)
 	{
+		std::vector<DrawCommand> drawCommands;
+		uint32_t baseInstance = 0;
+		m_InstanceDataBufferTop = 0;
+
+
+		auto context = static_cast<SharedContext*>(glfwGetWindowUserPointer(window));
+		GeometryManager* geometryManager = context->geometryManager;
+
+		char* instanceData = (char*)glMapNamedBuffer(m_InstanceDataBuffer, GL_WRITE_ONLY);
+		for(auto drawData: m_DrawData)
+		{
+			Geometry& geometry = geometryManager->GetGeometry(drawData.geoID);
+			DrawCommand drawCommand{};
+
+			// unsure about this mapping
+			drawCommand.elementCount = geometry.elementCount;
+			drawCommand.instanceCount = drawData.instanceCount;
+			drawCommand.baseVertex = geometry.baseVertex;
+			drawCommand.firstIndex = geometry.firstIndex;
+			drawCommand.baseInstance = baseInstance;
+
+			drawCommands.push_back(drawCommand);
+
+			const size_t instanceDataSize = drawData.instanceData.size() * sizeof(InstanceData);
+			assert(m_InstanceDataBufferTop + instanceDataSize < INSTANCE_BUFFER_DATA_SIZE);
+			memcpy(instanceData + m_InstanceDataBufferTop,
+				drawData.instanceData.data(), 
+				instanceDataSize
+			);
+			m_InstanceDataBufferTop += instanceDataSize;
+
+			baseInstance += drawData.instanceCount;
+		}
+		glUnmapNamedBuffer(m_InstanceDataBuffer);
+
+
+
+		glBindVertexArray(m_VertexArray);
+		
+
+		glMultiDrawElementsIndirect(
+			GL_TRIANGLES, 
+			GL_UNSIGNED_INT, 
+			(const void*)drawCommands.data(), 
+			drawCommands.size(),
+			sizeof(DrawCommand)
+		);
+
+		glBindVertexArray(0);
+
+		m_DrawData.clear();
 	}
 
 private:
+	std::vector<DrawData> m_DrawData;
+	GLuint m_VertexArray;
+	GLuint m_InstanceDataBuffer;
+	GLuint m_DrawIndirectBuffer;
 
 
+	GLintptr m_InstanceDataBufferTop;
 };
 
 
@@ -361,7 +577,6 @@ int main()
 	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	glfwSwapInterval(1);
 
-
 	if (GLEW_OK != glewInit())
 	{
 		std::cout << "Couldn't initialize GLEW\n";
@@ -369,30 +584,35 @@ int main()
 		abort();
 	}
 
+	glDebugMessageCallback(DebugCallback, 0);
 	
+	SharedContext sharedContext{};
+	glfwSetWindowUserPointer(window, &sharedContext);
 	
 	int w, h;
 	glfwGetWindowSize(window, &w, &h);
-
 	Camera camera((float)w/h);
-
-	SharedContext sharedContext{};
 	sharedContext.worldCamera = &camera;
-	glfwSetWindowUserPointer(window, &sharedContext);
 
-	
+	GeometryManager geometryManager;
+	sharedContext.geometryManager = &geometryManager;
 
 
 	const char* vertexShaderText =
 		"#version 460\n"
 		"layout(location = 0) in vec3 a_Position;\n"
+		"layout(location = 1) in mat4 a_ModelMat;\n"
 		"uniform mat4 u_ModelMat;\n"
 		"uniform mat4 u_ViewMat;\n"
 		"uniform mat4 u_PerspectiveMat;\n"
 		"void main()\n"
 		"{\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * u_ModelMat * vec4(a_Position, 1.0);\n"
+		"gl_Position = u_PerspectiveMat * u_ViewMat * a_ModelMat * vec4(a_Position, 1.0);\n"
 		"}";
+
+
+	// TODO ModelMat wieder einfügen
+
 
 	const char* fragmentShaderText =
 		"#version 460\n"
@@ -425,26 +645,27 @@ int main()
 		0.f, 0.f, 1.f
 	};
 
-	GLuint Geo1Indices[] = { 0,1,2 };
+	uint32_t Geo1Indices[] = { 0,1,2 };
 
 	float trianglePositions[] = {
-		-0.5f, -0.5f, 0.0f,
-		 0.5f, -0.5f, 0.0f,
-		 0.5f,  0.5f, 0.0f,
-		-0.5f,  0.5f, 0.0f
+		-0.5f, -0.5f, 1.0f,
+		 0.5f, -0.5f, 1.0f,
+		 0.5f,  0.5f, 1.0f,
+		-0.5f,  0.5f, 1.0f
 	};
 
-	GLuint triangleIndices[] = {
+	uint32_t triangleIndices[] = {
 		0,1,2,
 		0,2,3
 	};
 
-	GeometryManager geometryManager;
+
 	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
 	geometryManager.AddGeometry("square", trianglePositions, sizeof(trianglePositions), triangleIndices, sizeof(triangleIndices) / sizeof(GLuint));
 
 
-
+	/*
+	 
 	GLuint vertexBuffer;
 	glCreateBuffers(1, &vertexBuffer);
 	glNamedBufferData(vertexBuffer, sizeof(trianglePositions), trianglePositions, GL_STATIC_DRAW);
@@ -471,7 +692,9 @@ int main()
 
 	// Associate elementbuffer with vertexarray
 	glVertexArrayElementBuffer(VAOID, indexBuffer);
+	glBindVertexArray(VAOID);
 
+	 */
 
 
 	GLint modelMatLoc = glGetUniformLocation(program, "u_ModelMat");
@@ -479,19 +702,37 @@ int main()
 	GLint perspectiveMatLoc = glGetUniformLocation(program, "u_PerspectiveMat");
 
 	glm::mat4 identity = glm::mat4(1.f);
-
-	glm::mat4 rectModelMat = identity;
-
+	
 	
 	glUseProgram(program);
-	glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, glm::value_ptr(identity));
+	//glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, glm::value_ptr(identity));
 	glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 	glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
 	glUseProgram(0);
 
 
-	glBindVertexArray(VAOID);
-	glUseProgram(program);
+
+	glm::mat4 mat = { 0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 13.f, 14.f, 15.f};
+
+
+	Renderable a;
+	a.geoID = sharedContext.geometryManager->GetID("triangle");
+	a.modelTransform = glm::mat4(1.f);
+	//a.modelTransform = mat;
+	
+
+	Renderable c;
+	c.geoID = sharedContext.geometryManager->GetID("triangle");
+	c.modelTransform = glm::translate(glm::mat4(1.f), { 2.f, 0, 2.f });
+
+	Renderable b;
+	b.geoID = sharedContext.geometryManager->GetID("square");
+	b.modelTransform = glm::mat4(1.f);
+
+
+	Renderer renderer;
+	renderer.SetVertexBuffer(sharedContext.geometryManager->GetVertexBufferID());
+	renderer.SetElementBuffer(sharedContext.geometryManager->GetElementBufferID());
 
 	glClearColor(0.16f, 0.2f, 0.35f, 1.f);
 	while (!glfwWindowShouldClose(window))
@@ -506,13 +747,24 @@ int main()
 
 		camera.Update(dt);
 
-		//rectModelMat = glm::rotate(rectModelMat, (float)dt * glm::radians(90.f), glm::vec3(0.f, 1.f, 0.f));
-		glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, glm::value_ptr(rectModelMat));
+		glUseProgram(program);
 		glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 		glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
 
 
-		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+		renderer.Submit(a);
+		renderer.Submit(a);
+		renderer.Submit(b);
+		//renderer.Submit(c);
+
+
+
+
+		renderer.EndScene(window);
+		glUseProgram(0);
+
+
+		//glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();
