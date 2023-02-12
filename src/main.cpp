@@ -217,6 +217,120 @@ void WindowSizeCallback(GLFWwindow* window, int width, int height)
 	sharedContext->worldCamera->SetAspectRatio((float)width / (float)height);
 }
 
+typedef uint32_t GeoID;
+
+#define VERTEX_BUFFER_SIZE 1024 * 1024 * 16 //16mb
+#define ELEMENT_BUFFER_SIZE 1024 * 1024 * 16 //16mb
+
+struct Geometry
+{
+	GLsizei elementCount;
+	size_t firstElement;
+	size_t baseVertex;
+
+};
+
+class GeometryManager
+{
+public:
+	GeometryManager()
+		: m_VertexBuffer(0)
+		, m_ElementBuffer(0)
+		, m_VertexBufferTop(0)
+		, m_ElementBufferTop(0)
+		, m_NextID(1)
+	{
+		glCreateBuffers(1, &m_VertexBuffer);
+		glNamedBufferData(m_VertexBuffer, VERTEX_BUFFER_SIZE, nullptr, GL_STATIC_DRAW);
+
+		glCreateBuffers(1, &m_ElementBuffer);
+		glNamedBufferData(m_ElementBuffer, ELEMENT_BUFFER_SIZE, nullptr, GL_STATIC_DRAW);
+
+	}
+
+	~GeometryManager()
+	{
+		// delete buffers
+	}
+
+	void AddGeometry(const std::string& name, void* vertexData, GLsizeiptr bytes, uint32_t* elementData, uint32_t elementCount)
+	{
+		assert(m_VertexBufferTop + bytes < VERTEX_BUFFER_SIZE);
+		assert(m_ElementBufferTop + elementCount * 4 < ELEMENT_BUFFER_SIZE);
+
+		Geometry& geometry = m_Geometry[m_NextID];
+		geometry.elementCount = elementCount;
+		geometry.firstElement = m_ElementBufferTop / 4;
+		geometry.baseVertex = m_VertexBufferTop;
+
+
+		glNamedBufferSubData(m_VertexBuffer, m_VertexBufferTop, bytes, vertexData);
+		m_VertexBufferTop += bytes;
+
+		glNamedBufferSubData(m_ElementBuffer, m_ElementBufferTop, elementCount * sizeof(uint32_t), (void*)elementData);
+		m_ElementBufferTop += elementCount * sizeof(uint32_t);
+
+		assert(m_NameToGeoID.find(name) == m_NameToGeoID.end());
+		m_NameToGeoID[name] = m_NextID++;
+	}
+
+	GeoID GetID(const std::string name)
+	{
+		auto it = m_NameToGeoID.find(name);
+		if(it == m_NameToGeoID.end())
+		{
+			return 0;
+		}
+
+		return it->second;
+	}
+
+	Geometry& GetGeometry(GeoID geoID)
+	{
+		assert(m_Geometry.find(geoID) != m_Geometry.end());
+		return m_Geometry[geoID];
+	}
+
+private:
+	GLuint m_VertexBuffer;
+	GLuint m_ElementBuffer;
+
+	GLintptr m_VertexBufferTop;
+	GLintptr m_ElementBufferTop;
+	
+
+	GeoID m_NextID;
+
+	std::unordered_map<std::string, GeoID> m_NameToGeoID;
+	std::unordered_map<GeoID, Geometry> m_Geometry;
+
+};
+
+struct Renderable
+{
+	GeoID geoID;
+	glm::mat4 modelTransform;
+};
+
+class Renderer
+{
+public:
+	void BeginScene()
+	{
+	}
+
+	void Submit(const Renderable& renderable)
+	{
+	}
+
+	void EndScene()
+	{
+	}
+
+private:
+
+
+};
 
 
 int main()
@@ -305,7 +419,13 @@ int main()
 	glAttachShader(program, fragmentShader);
 	glLinkProgram(program);
 
+	float Geo1[] = {
+		-1.f, -1.f, 1.f,
+		0.f, -1.f, 1.f,
+		0.f, 0.f, 1.f
+	};
 
+	GLuint Geo1Indices[] = { 0,1,2 };
 
 	float trianglePositions[] = {
 		-0.5f, -0.5f, 0.0f,
@@ -318,6 +438,11 @@ int main()
 		0,1,2,
 		0,2,3
 	};
+
+	GeometryManager geometryManager;
+	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
+	geometryManager.AddGeometry("square", trianglePositions, sizeof(trianglePositions), triangleIndices, sizeof(triangleIndices) / sizeof(GLuint));
+
 
 
 	GLuint vertexBuffer;
