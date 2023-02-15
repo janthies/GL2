@@ -263,6 +263,8 @@ struct Geometry
 
 };
 
+#define SIZE_OF_VERTEX 12 // in bytes
+
 class GeometryManager
 {
 public:
@@ -297,7 +299,7 @@ public:
 		Geometry& geometry = m_Geometry[m_NextID];
 		geometry.elementCount = elementCount;
 		geometry.firstIndex = m_Indices;
-		geometry.baseVertex = (GLint)m_VertexBufferTop / 4;
+		geometry.baseVertex = (GLint)m_VertexBufferTop / SIZE_OF_VERTEX;
 
 
 		m_Indices += elementCount;
@@ -320,6 +322,11 @@ public:
 	GLuint GetElementBufferID()
 	{
 		return m_ElementBuffer;
+	}
+
+	size_t GetGeoCount()
+	{
+		return m_NextID - 1;
 	}
 
 	GeoID GetID(const std::string name)
@@ -390,6 +397,8 @@ public:
 	Renderer()
 		: m_VertexArray(0)
 		, m_InstanceDataBuffer(0)
+		, m_DrawIndirectBuffer(0)
+		, m_GeoManagerGeoCount(0)
 		, m_InstanceDataBufferTop(0)
 	{
 		glCreateVertexArrays(1, &m_VertexArray);
@@ -422,10 +431,6 @@ public:
 		glVertexArrayBindingDivisor(m_VertexArray, 1, 1);
 
 		LOG_INFO("Renderer initialized InstanceDataBuffer")
-
-		glCreateBuffers(1, &m_DrawIndirectBuffer);
-		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_DrawIndirectBuffer);
-
 	}
 
 	~Renderer()
@@ -439,14 +444,20 @@ public:
 		glEnableVertexArrayAttrib(m_VertexArray, 0);
 		glVertexArrayVertexBuffer(m_VertexArray, 0, vertexBufferID, 0, sizeof(float) * 3);
 		glVertexArrayAttribFormat(m_VertexArray, 0, 3, GL_FLOAT, GL_FALSE, 0);
-
-
 	}
 
 	void SetElementBuffer(GLuint elementBufferID)
 	{
 		LOG_INFO("Set element buffer for renderer")
 		glVertexArrayElementBuffer(m_VertexArray, elementBufferID);
+	}
+
+	void SetGeoCount(size_t count)
+	{
+		m_GeoManagerGeoCount = count;
+
+		glCreateBuffers(1, &m_DrawIndirectBuffer);
+		glNamedBufferData(m_DrawIndirectBuffer, m_GeoManagerGeoCount * sizeof(DrawCommand), nullptr, GL_STREAM_DRAW);
 	}
 
 	void BeginScene()
@@ -520,20 +531,22 @@ public:
 		}
 		glUnmapNamedBuffer(m_InstanceDataBuffer);
 
+		glNamedBufferSubData(m_DrawIndirectBuffer, 0, drawCommands.size() * sizeof(DrawCommand), drawCommands.data());
 
-
+		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_DrawIndirectBuffer);
 		glBindVertexArray(m_VertexArray);
 		
 
 		glMultiDrawElementsIndirect(
 			GL_TRIANGLES, 
 			GL_UNSIGNED_INT, 
-			(const void*)drawCommands.data(), 
+			nullptr, 
 			drawCommands.size(),
-			sizeof(DrawCommand)
+			0
 		);
 
 		glBindVertexArray(0);
+		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 
 		m_DrawData.clear();
 	}
@@ -543,6 +556,8 @@ private:
 	GLuint m_VertexArray;
 	GLuint m_InstanceDataBuffer;
 	GLuint m_DrawIndirectBuffer;
+
+	size_t m_GeoManagerGeoCount;
 
 
 	GLintptr m_InstanceDataBufferTop;
@@ -660,8 +675,8 @@ int main()
 	};
 
 
-	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
 	geometryManager.AddGeometry("square", trianglePositions, sizeof(trianglePositions), triangleIndices, sizeof(triangleIndices) / sizeof(GLuint));
+	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
 
 
 	/*
@@ -727,12 +742,13 @@ int main()
 
 	Renderable b;
 	b.geoID = sharedContext.geometryManager->GetID("square");
-	b.modelTransform = glm::mat4(1.f);
+	b.modelTransform = glm::translate(glm::mat4(1.f), { 0.f, 1.5f, 0.f });
 
 
 	Renderer renderer;
 	renderer.SetVertexBuffer(sharedContext.geometryManager->GetVertexBufferID());
 	renderer.SetElementBuffer(sharedContext.geometryManager->GetElementBufferID());
+	renderer.SetGeoCount(sharedContext.geometryManager->GetGeoCount());
 
 	glClearColor(0.16f, 0.2f, 0.35f, 1.f);
 	while (!glfwWindowShouldClose(window))
@@ -753,7 +769,7 @@ int main()
 
 
 		renderer.Submit(a);
-		renderer.Submit(a);
+		renderer.Submit(c);
 		renderer.Submit(b);
 		//renderer.Submit(c);
 
