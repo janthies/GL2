@@ -28,3 +28,17 @@ target_precompile_headers(
     main
     PRIVATE ${CMAKE_SOURCE_DIR}/src/include/Pch.h
 )
+
+add_custom_command(
+    TARGET main POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/src/assets
+    ${CMAKE_BINARY_DIR}/bin/assets
+)
+
+add_custom_command(
+    TARGET main POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/src/assets
+    $<TARGET_FILE_DIR:main>/assets
+)
