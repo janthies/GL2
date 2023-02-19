@@ -628,19 +628,148 @@ private:
 	GLintptr m_InstanceDataBufferTop;
 };
 
-class EntityManager
+
+class ShaderLoader
 {
 public:
+	static GLuint CreateProgram(const std::vector<std::string>& paths)
+	{
+		GLuint program = glCreateProgram();
+
+		for (auto& path : paths)
+		{
+			const std::string postfix = path.substr(path.find_last_of('.') + 1, path.size());
+			GLenum type;
+
+			if (postfix == "vs") { type = GL_VERTEX_SHADER; }
+			else if (postfix == "fs") { type = GL_FRAGMENT_SHADER; }
+			else if (postfix == "gs") { type = GL_GEOMETRY_SHADER; }
+			else if (postfix == "tc") { type = GL_TESS_CONTROL_SHADER; }
+			else if (postfix == "te") { type = GL_TESS_EVALUATION_SHADER; }
+			else if (postfix == "cs") { type = GL_COMPUTE_SHADER; }
+			else
+			{
+				LOG_ERROR("Invalid shader postfix [%s] upon loading [%s]", postfix.c_str(), path.c_str())
+					assert(false);
+			}
+
+
+			const std::string shaderText = LoadShaderText(path);
+			const char* shaderCstr = shaderText.c_str();
+
+
+			GLuint shaderHandle = glCreateShader(type);
+			glShaderSource(shaderHandle, 1, &shaderCstr, NULL);
+			glCompileShader(shaderHandle);
+
+			ValidateShader(shaderHandle, path);
+
+			glAttachShader(program, shaderHandle);
+		}
+
+		glLinkProgram(program);
+
+		ValidateProgram(program);
+
+
+		return program;
+	}
+
 
 private:
+	static std::string LoadShaderText(const std::string& path)
+	{
+
+		std::fstream file;
+		file.open(path);
+		if (!file.is_open())
+		{
+			LOG_ERROR("Couldn't open file at location [%s]", path.c_str())
+				assert(false);
+		}
+
+		std::string text;
+		std::string line;
+
+		while (std::getline(file, line))
+		{
+			text += line;
+			text += '\n';
+		}
+
+		file.close();
+		return text;
+	}
+
+	static void ValidateShader(GLuint shader, const std::string& path)
+	{
+		GLint isCompiled;
+		glGetShaderiv(shader, GL_COMPILE_STATUS, &isCompiled);
+
+		if(isCompiled == GL_FALSE)
+		{
+			LOG_ERROR("Compilation failed for shader [%s]", path. c_str())
+			PrintShaderLog(shader);
+			assert(false);
+		}
+	}
+
+	static void ValidateProgram(GLuint program)
+	{
+		GLint isLinked;
+		glGetProgramiv(program, GL_LINK_STATUS, &isLinked);
+
+		if(isLinked == GL_FALSE)
+		{
+
+			LOG_ERROR("Program [%d] not linked", program)
+			PrintProgramLog(program);
+			assert(false);
+		}
+	}
+
+	static void PrintShaderLog(GLuint shader)
+	{
+		int len = 0;
+		int writtenChars = 0;
+		char* buffer;
+
+		glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
+
+		if (len > 0)
+		{
+			buffer = (char*)malloc(len);
+			glGetShaderInfoLog(shader, len, &writtenChars, buffer);
+			LOG_ERROR("%s", buffer)
+		}
+	}
+
+	static void PrintProgramLog(GLuint program)
+	{
+		int len = 0;
+		int writtenChars = 0;
+		char* buffer;
+
+		glGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
+
+		if (len > 0)
+		{
+			buffer = (char*)malloc(len);
+			glGetProgramInfoLog(program, len, &writtenChars, buffer);
+			LOG_ERROR("%s", buffer)
+		}
+	}
 };
+
 
 struct Sphere
 {
 	Sphere(const int prec)
 	{
 		Init(prec);
+
 	}
+
 
 	void Init(const int prec)
 	{
@@ -768,10 +897,11 @@ int main()
 		"void main()\n"
 		"{\n"
 		"gsModelMat = a_ModelMat;\n"
-		"gl_Position =  vec4(a_Position, 1.0);\n"
+		//"gl_Position = u_PerspectiveMat * u_ViewMat * a_ModelMat * vec4(a_Position, 1.0);\n"
+		"gl_Position = vec4(a_Position, 1.0);\n"
 		"}";
 
-	//u_PerspectiveMat * u_ViewMat * a_ModelMat *
+	//
 
 
 	// TODO ModelMat wieder einfügen
@@ -816,10 +946,15 @@ int main()
 		"vertexPos = offset + gl_in[0].gl_Position;\n"
 		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
 		"EmitVertex();\n"
+		"EmitVertex();\n"
 		"EndPrimitive();\n"
 		"}\n";
-
-
+	
+	GLuint geoProgram = ShaderLoader::CreateProgram({
+		"assets/shaders/basicVert.vs",
+		"assets/shaders/basicFrag.fs",
+		"assets/shaders/pointToSquareGeo.gs",
+	});
 
 	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
 	glShaderSource(vertexShader, 1, &vertexShaderText, NULL);
@@ -838,11 +973,11 @@ int main()
 	glShaderSource(geoShader, 1, &geoShaderText, NULL);
 	glCompileShader(geoShader);
 
-	GLuint geoProgram = glCreateProgram();
-	glAttachShader(geoProgram, vertexShader);
-	glAttachShader(geoProgram, geoShader);
-	glAttachShader(geoProgram, fragmentShader);
-	glLinkProgram(geoProgram);
+	//GLuint geoProgram = glCreateProgram();
+	//glAttachShader(geoProgram, vertexShader);
+	//glAttachShader(geoProgram, fragmentShader);
+	//glAttachShader(geoProgram, geoShader);
+	//glLinkProgram(geoProgram);
 
 
 	float Geo1[] = {
@@ -912,7 +1047,6 @@ int main()
 	GLint viewMatLoc = glGetUniformLocation(geoProgram, "u_ViewMat");
 	GLint perspectiveMatLoc = glGetUniformLocation(geoProgram, "u_PerspectiveMat");
 
-	glm::mat4 identity = glm::mat4(1.f);
 	
 	
 	glUseProgram(geoProgram);
