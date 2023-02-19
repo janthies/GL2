@@ -250,7 +250,6 @@ void WindowSizeCallback(GLFWwindow* window, int width, int height)
 	sharedContext->worldCamera->SetAspectRatio((float)width / (float)height);
 }
 
-typedef uint32_t GeoID;
 
 #define VERTEX_BUFFER_SIZE 1024 * 1024 * 16 //16mb
 #define ELEMENT_BUFFER_SIZE 1024 * 1024 * 16 //16mb
@@ -265,6 +264,7 @@ struct Geometry
 
 #define SIZE_OF_VERTEX 12 // in bytes
 
+typedef uint32_t GeoID;
 class GeometryManager
 {
 public:
@@ -367,47 +367,61 @@ struct Renderable
 	glm::mat4 modelTransform;
 };
 
-
-struct InstanceData
-{
-	glm::mat4 modelTransform = glm::mat4(1.f);
-};
-
-struct DrawData
-{
-	GeoID geoID;
-	uint32_t instanceCount;
-	std::vector<InstanceData> instanceData;
-};
-
-struct DrawCommand
-{
-	GLuint elementCount;
-	GLuint instanceCount;
-	GLuint firstIndex;
-	GLint baseVertex;
-	GLuint baseInstance;
-};
-
-#define INSTANCE_BUFFER_DATA_SIZE 1024 * 1024 // 1mb
+#define INSTANCE_BUFFER_DATA_SIZE 1024 * 1024 * 128 // 64mb
 
 class Renderer
 {
+private:
+	struct InstanceData
+	{
+		glm::mat4 modelTransform = glm::mat4(1.f);
+	};
+
+	struct DrawData
+	{
+		GeoID geoID;
+		uint32_t instanceCount;
+		std::vector<InstanceData> instanceData{};
+	};
+
+	struct DrawCommand
+	{
+		GLuint elementCount;
+		GLuint instanceCount;
+		GLuint firstIndex;
+		GLint baseVertex;
+		GLuint baseInstance;
+	};
+
+
 public:
 	Renderer()
 		: m_VertexArray(0)
-		, m_InstanceDataBuffer(0)
+		, m_InstanceDataBuffer{0,0}
+		, m_PersistentInstanceDataBuffer(0)
 		, m_DrawIndirectBuffer(0)
 		, m_GeoManagerGeoCount(0)
 		, m_InstanceDataBufferTop(0)
 	{
 		glCreateVertexArrays(1, &m_VertexArray);
-		glCreateBuffers(1, &m_InstanceDataBuffer);
-		glNamedBufferData(m_InstanceDataBuffer, INSTANCE_BUFFER_DATA_SIZE, nullptr, GL_DYNAMIC_DRAW);
 
+		glCreateBuffers(2, m_InstanceDataBuffer);
+
+		glNamedBufferData(m_InstanceDataBuffer[0], INSTANCE_BUFFER_DATA_SIZE, nullptr, GL_STATIC_DRAW);
+		glNamedBufferData(m_InstanceDataBuffer[1], INSTANCE_BUFFER_DATA_SIZE, nullptr, GL_STATIC_DRAW);
+
+
+		m_SyncObject = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+		GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+		glCreateBuffers(1, &m_PersistentInstanceDataBuffer);
+		glNamedBufferStorage(m_PersistentInstanceDataBuffer, INSTANCE_BUFFER_DATA_SIZE, nullptr, flags);
+
+		m_InstanceDataPtr = (char*)glMapNamedBufferRange(m_PersistentInstanceDataBuffer, 0, INSTANCE_BUFFER_DATA_SIZE, flags);
 
 		// Bind buffer to binding point 1
-		glVertexArrayVertexBuffer(m_VertexArray, 1, m_InstanceDataBuffer, 0, 64);
+		//glVertexArrayVertexBuffer(m_VertexArray, 1, m_InstanceDataBuffer[0], 0, 64);
+		glVertexArrayVertexBuffer(m_VertexArray, 1, m_PersistentInstanceDataBuffer, 0, 64);
 
 		// Enable attribute indices
 		glEnableVertexArrayAttrib(m_VertexArray, 1);
@@ -450,6 +464,7 @@ public:
 	{
 		LOG_INFO("Set element buffer for renderer")
 		glVertexArrayElementBuffer(m_VertexArray, elementBufferID);
+		
 	}
 
 	void SetGeoCount(size_t count)
@@ -477,12 +492,13 @@ public:
 
 			drawDataPos++;
 		}
-
+		 
 		// Create new entry if no DrawData entry exists for current geoID
 		if(drawDataPos >= m_DrawData.size())
 		{
 			DrawData drawData{};
 			drawData.geoID = renderable.geoID;
+			drawData.instanceData.reserve(30000);
 			m_DrawData.push_back(drawData);
 		}
 
@@ -504,7 +520,17 @@ public:
 		auto context = static_cast<SharedContext*>(glfwGetWindowUserPointer(window));
 		GeometryManager* geometryManager = context->geometryManager;
 
-		char* instanceData = (char*)glMapNamedBuffer(m_InstanceDataBuffer, GL_WRITE_ONLY);
+
+
+		// Wait buffer
+		GLenum waitReturn = GL_UNSIGNALED;
+		while (waitReturn != GL_ALREADY_SIGNALED && waitReturn != GL_CONDITION_SATISFIED)
+		{
+			waitReturn = glClientWaitSync(m_SyncObject, GL_SYNC_FLUSH_COMMANDS_BIT, 1);
+		}
+		glDeleteSync(m_SyncObject);
+
+
 		for(auto drawData: m_DrawData)
 		{
 			Geometry& geometry = geometryManager->GetGeometry(drawData.geoID);
@@ -521,21 +547,25 @@ public:
 
 			const size_t instanceDataSize = drawData.instanceData.size() * sizeof(InstanceData);
 			assert(m_InstanceDataBufferTop + instanceDataSize < INSTANCE_BUFFER_DATA_SIZE);
-			memcpy(instanceData + m_InstanceDataBufferTop,
+
+
+			memcpy(m_InstanceDataPtr + m_InstanceDataBufferTop,
 				drawData.instanceData.data(), 
 				instanceDataSize
 			);
 			m_InstanceDataBufferTop += instanceDataSize;
+			LOG_INFO("Copied %d bytes into instance data buffer", instanceDataSize)
+
 
 			baseInstance += drawData.instanceCount;
 		}
-		glUnmapNamedBuffer(m_InstanceDataBuffer);
+		// Lock buffer
+		m_SyncObject = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
 		glNamedBufferSubData(m_DrawIndirectBuffer, 0, drawCommands.size() * sizeof(DrawCommand), drawCommands.data());
 
 		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_DrawIndirectBuffer);
 		glBindVertexArray(m_VertexArray);
-		
 
 		glMultiDrawElementsIndirect(
 			GL_TRIANGLES, 
@@ -551,16 +581,117 @@ public:
 		m_DrawData.clear();
 	}
 
+	void DrawIndexed(GLFWwindow* window, const Renderable& renderable)
+	{
+
+		auto context = static_cast<SharedContext*>(glfwGetWindowUserPointer(window));
+		GeometryManager* geometryManager = context->geometryManager;
+		Geometry& geometry = geometryManager->GetGeometry(renderable.geoID);
+
+
+		GLenum waitReturn = GL_UNSIGNALED;
+		while (waitReturn != GL_ALREADY_SIGNALED && waitReturn != GL_CONDITION_SATISFIED)
+		{
+			waitReturn = glClientWaitSync(m_SyncObject, GL_SYNC_FLUSH_COMMANDS_BIT, 1);
+		}
+		glDeleteSync(m_SyncObject);
+
+		memcpy(m_InstanceDataPtr + m_InstanceDataBufferTop, glm::value_ptr(renderable.modelTransform), sizeof(InstanceData));
+		m_SyncObject = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+		glPointSize(10.f);
+		glBindVertexArray(m_VertexArray);
+		
+		glDrawElementsBaseVertex(
+			GL_POINTS, // todo
+			geometry.elementCount,
+			GL_UNSIGNED_INT,
+			(const void*) (4 * geometry.firstIndex),
+			geometry.baseVertex
+		);
+
+		glBindVertexArray(0);
+	}
+
 private:
 	std::vector<DrawData> m_DrawData;
 	GLuint m_VertexArray;
-	GLuint m_InstanceDataBuffer;
+	GLuint m_InstanceDataBuffer[2];
+	GLuint m_PersistentInstanceDataBuffer;
 	GLuint m_DrawIndirectBuffer;
+
+	GLsync m_SyncObject;
+
+	char* m_InstanceDataPtr;
 
 	size_t m_GeoManagerGeoCount;
 
-
 	GLintptr m_InstanceDataBufferTop;
+};
+
+class EntityManager
+{
+public:
+
+private:
+};
+
+struct Sphere
+{
+	Sphere(const int prec)
+	{
+		Init(prec);
+	}
+
+	void Init(const int prec)
+	{
+		const int numVertices = (prec + 1) * (prec + 1);
+		const int numIndices = prec * prec * 6;
+
+		// Default initialize i indices (NOT PERFORMANT AT ALL)
+		for (int i = 0; i < numIndices; i++)
+		{
+			m_Indices.push_back(0);
+		}
+
+		for (int i = 0; i <= prec; i++)
+		{
+			for (int j = 0; j <= prec; j++)
+			{
+				float y = (float)cos(glm::radians(180.0f - i * 180.0f / prec));
+				// not sure what the minus infront of cos is used for
+				// The minus infront of the x or z value influences the winding!
+				float x = -(float)cos(glm::radians(j * 360.0f / prec)) * (float)abs(cos(asin(y)));
+				float z = (float)sin(glm::radians(j * 360.0f / prec)) * (float)abs(cos(asin(y)));
+
+
+				m_Vertices.push_back(x);
+				m_Vertices.push_back(y);
+				m_Vertices.push_back(z);
+				//Vertex& vertex = m_Vertices[i * (prec + 1) + j];
+				//vertex.position = glm::vec3(x, y, z);
+				//vertex.color = glm::vec4(0.2f, 0.3f, 0.8f, 1.f);
+				//// No color value specified
+				//vertex.texCoord = glm::vec2(((float)j / prec), ((float)i / prec));
+				//vertex.normal = glm::vec3(x, y, z);
+			}
+		}
+		for (int i = 0; i < prec; i++)
+		{
+			for (int j = 0; j < prec; j++)
+			{
+				m_Indices[6 * (i * prec + j) + 0] = i * (prec + 1) + j;
+				m_Indices[6 * (i * prec + j) + 1] = i * (prec + 1) + j + 1;
+				m_Indices[6 * (i * prec + j) + 2] = (i + 1) * (prec + 1) + j;
+				m_Indices[6 * (i * prec + j) + 3] = i * (prec + 1) + j + 1;
+				m_Indices[6 * (i * prec + j) + 4] = (i + 1) * (prec + 1) + j + 1;
+				m_Indices[6 * (i * prec + j) + 5] = (i + 1) * (prec + 1) + j;
+			}
+		}
+	}
+
+
+	std::vector<float> m_Vertices;
+	std::vector<uint32_t> m_Indices;
 };
 
 
@@ -600,6 +731,20 @@ int main()
 	}
 
 	glDebugMessageCallback(DebugCallback, 0);
+	glEnable(GL_DEPTH_TEST);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	//glEnable(GL_CULL_FACE);
+
+
+	GLint noExtensions = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &noExtensions);
+
+	std::set<std::string> oglExtensions;
+	for(int i = 0; i < noExtensions; i++)
+	{
+		oglExtensions.insert((const char*)glGetStringi(GL_EXTENSIONS, i));
+	}
+	bool isSupported = oglExtensions.find("GL_ARB_bindless_texture") != oglExtensions.end();
 	
 	SharedContext sharedContext{};
 	glfwSetWindowUserPointer(window, &sharedContext);
@@ -617,13 +762,16 @@ int main()
 		"#version 460\n"
 		"layout(location = 0) in vec3 a_Position;\n"
 		"layout(location = 1) in mat4 a_ModelMat;\n"
-		"uniform mat4 u_ModelMat;\n"
 		"uniform mat4 u_ViewMat;\n"
 		"uniform mat4 u_PerspectiveMat;\n"
+		"out mat4 gsModelMat;\n"
 		"void main()\n"
 		"{\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * a_ModelMat * vec4(a_Position, 1.0);\n"
+		"gsModelMat = a_ModelMat;\n"
+		"gl_Position =  vec4(a_Position, 1.0);\n"
 		"}";
+
+	//u_PerspectiveMat * u_ViewMat * a_ModelMat *
 
 
 	// TODO ModelMat wieder einfügen
@@ -635,10 +783,42 @@ int main()
 		"\n"
 		"void main()\n"
 		"{\n"
-		"color = vec4(0.6, 0.5, 0.0, 1.0);\n"
+		"color = vec4(1,1,0, 1.0);\n"
 		"}\n";
 
-	
+
+
+	const char* geoShaderText =
+		"#version 460\n"
+		"layout(points) in;\n"
+		"layout(triangle_strip, max_vertices=4) out;\n"
+		"in mat4 gsModelMat[];\n"
+		"uniform mat4 u_ViewMat;\n"
+		"uniform mat4 u_PerspectiveMat;\n"
+		"void main()\n"
+		"{\n"
+		"vec4 offset = vec4(-0.25, 0.25, 0.0, 0.0);\n" // oben links
+		"vec4 vertexPos = offset + gl_in[0].gl_Position;\n"
+		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
+		"EmitVertex();\n"
+		"\n"
+		"offset = vec4(0.25, 0.25, 0.0, 0.0);\n" // oben rechts
+		"vertexPos = offset + gl_in[0].gl_Position;\n"
+		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
+		"EmitVertex();\n"
+		"\n"
+		"offset = vec4(-0.25, -0.25, 0.0, 0.0);\n" // unten links
+		"vertexPos = offset + gl_in[0].gl_Position;\n"
+		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
+		"EmitVertex();\n"
+		"\n"
+		"offset = vec4(0.25, -0.25, 0.0, 0.0);\n" // unten rechts
+		"vertexPos = offset + gl_in[0].gl_Position;\n"
+		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
+		"EmitVertex();\n"
+		"EndPrimitive();\n"
+		"}\n";
+
 
 
 	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
@@ -654,19 +834,30 @@ int main()
 	glAttachShader(program, fragmentShader);
 	glLinkProgram(program);
 
+	GLuint geoShader = glCreateShader(GL_GEOMETRY_SHADER);
+	glShaderSource(geoShader, 1, &geoShaderText, NULL);
+	glCompileShader(geoShader);
+
+	GLuint geoProgram = glCreateProgram();
+	glAttachShader(geoProgram, vertexShader);
+	glAttachShader(geoProgram, geoShader);
+	glAttachShader(geoProgram, fragmentShader);
+	glLinkProgram(geoProgram);
+
+
 	float Geo1[] = {
-		-1.f, -1.f, 1.f,
-		0.f, -1.f, 1.f,
-		0.f, 0.f, 1.f
+		0.f, 0.f, 0.f,
+		1.f, 0.f, 0.f,
+		1.f, 1.f, 0.f
 	};
 
 	uint32_t Geo1Indices[] = { 0,1,2 };
 
 	float trianglePositions[] = {
-		-0.5f, -0.5f, 1.0f,
-		 0.5f, -0.5f, 1.0f,
-		 0.5f,  0.5f, 1.0f,
-		-0.5f,  0.5f, 1.0f
+		-0.5f, -0.5f, 0.0f,
+		 0.5f, -0.5f, 0.0f,
+		 0.5f,  0.5f, 0.0f,
+		-0.5f,  0.5f, 0.0f
 	};
 
 	uint32_t triangleIndices[] = {
@@ -675,51 +866,56 @@ int main()
 	};
 
 
+	float fuenfeck[] = {
+		 0.0f,  0.5f, 0.0f,
+		-0.5f,  0.3f, 0.0f,
+		-0.3f, -0.4f, 0.0f,
+		 0.3f, -0.4f, 0.0f,
+		 0.5f,  0.3f, 0.0f,
+	};
+
+	uint32_t fuenfeckIndices[] = {
+		0,1,2,
+		0,2,3,
+		0,3,4
+	};
+
+	float simpleCube[] = { 
+		 0.5f,  0.5f,  0.5f, //or   0
+		-0.5f,  0.5f,  0.5f, //ol	1
+		-0.5f, -0.5f,  0.5f, //ul	2
+		 0.5f, -0.5f,  0.5f, //ur	3
+		 0.5f,  0.5f, -0.5f, //or	4
+		-0.5f,  0.5f, -0.5f, //ol	5
+		-0.5f, -0.5f, -0.5f, //ul	6
+		 0.5f, -0.5f, -0.5f, //ur	7
+	};
+
+	uint32_t simpleCubeIndices[] = {
+		0,1,2,0,2,3, // vorne
+		4,0,3,4,3,7, // rechts
+		5,4,7,5,7,6, // hinten
+		1,5,6,1,6,2, // links
+		4,5,1,4,1,0, // oben
+		3,2,6,3,6,7
+
+	};
+
+	Sphere sphere30(10);
+
 	geometryManager.AddGeometry("square", trianglePositions, sizeof(trianglePositions), triangleIndices, sizeof(triangleIndices) / sizeof(GLuint));
 	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
+	geometryManager.AddGeometry("fuenfeck", fuenfeck, sizeof(fuenfeck), fuenfeckIndices, sizeof(fuenfeckIndices) / sizeof(GLuint));
+	geometryManager.AddGeometry("simpleCube", simpleCube, sizeof(simpleCube), simpleCubeIndices, sizeof(simpleCubeIndices) / sizeof(GLuint));
+	geometryManager.AddGeometry("sphere30", sphere30.m_Vertices.data(), sphere30.m_Vertices.size() * sizeof(float), sphere30.m_Indices.data(), sphere30.m_Vertices.size() * sizeof(uint32_t));
 
-
-	/*
-	 
-	GLuint vertexBuffer;
-	glCreateBuffers(1, &vertexBuffer);
-	glNamedBufferData(vertexBuffer, sizeof(trianglePositions), trianglePositions, GL_STATIC_DRAW);
-
-
-	GLuint indexBuffer;
-	glCreateBuffers(1, &indexBuffer);
-	glNamedBufferData(indexBuffer, sizeof(triangleIndices), triangleIndices, GL_STATIC_DRAW);
-
-
-	// create a vao
-	GLuint VAOID;
-	glCreateVertexArrays(1, &VAOID);
-
-	// enable vao binding so that vertices get passed along to shader
-	glEnableVertexArrayAttrib(VAOID, 0);
-
-	// associate VAO binding with vertex attribute in buffer
-	glVertexArrayVertexBuffer(VAOID, 0, vertexBuffer, 0, 3 * sizeof(float));
-
-
-	// define format of vertex attrib
-	glVertexArrayAttribFormat(VAOID, 0, 3, GL_FLOAT, GL_FALSE, 0);
-
-	// Associate elementbuffer with vertexarray
-	glVertexArrayElementBuffer(VAOID, indexBuffer);
-	glBindVertexArray(VAOID);
-
-	 */
-
-
-	GLint modelMatLoc = glGetUniformLocation(program, "u_ModelMat");
-	GLint viewMatLoc = glGetUniformLocation(program, "u_ViewMat");
-	GLint perspectiveMatLoc = glGetUniformLocation(program, "u_PerspectiveMat");
+	GLint viewMatLoc = glGetUniformLocation(geoProgram, "u_ViewMat");
+	GLint perspectiveMatLoc = glGetUniformLocation(geoProgram, "u_PerspectiveMat");
 
 	glm::mat4 identity = glm::mat4(1.f);
 	
 	
-	glUseProgram(program);
+	glUseProgram(geoProgram);
 	//glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, glm::value_ptr(identity));
 	glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 	glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
@@ -734,21 +930,49 @@ int main()
 	a.geoID = sharedContext.geometryManager->GetID("triangle");
 	a.modelTransform = glm::mat4(1.f);
 	//a.modelTransform = mat;
-	
 
-	Renderable c;
-	c.geoID = sharedContext.geometryManager->GetID("triangle");
-	c.modelTransform = glm::translate(glm::mat4(1.f), { 2.f, 0, 2.f });
+	Renderable plane;
+	plane.geoID = sharedContext.geometryManager->GetID("square");
+	plane.modelTransform = glm::translate(glm::mat4(1.f), { 0.f, 1.5f, 0.f });
 
-	Renderable b;
-	b.geoID = sharedContext.geometryManager->GetID("square");
-	b.modelTransform = glm::translate(glm::mat4(1.f), { 0.f, 1.5f, 0.f });
+	Renderable sphere;
+	sphere.geoID = sharedContext.geometryManager->GetID("sphere30");
+	sphere.modelTransform = glm::translate(glm::mat4(1.f), { 2.f, 0, 2.f });
 
+	Renderable cube;
+	cube.geoID = sharedContext.geometryManager->GetID("simpleCube");
+	cube.modelTransform = glm::mat4(1.f);
 
 	Renderer renderer;
 	renderer.SetVertexBuffer(sharedContext.geometryManager->GetVertexBufferID());
 	renderer.SetElementBuffer(sharedContext.geometryManager->GetElementBufferID());
 	renderer.SetGeoCount(sharedContext.geometryManager->GetGeoCount());
+
+	constexpr uint32_t gridsize = 22;
+	constexpr uint32_t distance = 80;
+	
+
+	std::vector<Renderable> renderables;
+	renderables.reserve(gridsize* gridsize* gridsize);
+
+
+	GeoID geoID = sharedContext.geometryManager->GetID("sphere30");
+	for(int x = 0; x < gridsize; x++)
+	{
+		for(int y = 0; y < gridsize; y++)
+		{
+			for(int z = 0; z < gridsize; z++)
+			{
+				Renderable renderable{};
+				renderable.geoID = geoID;
+				renderable.modelTransform = glm::translate(
+					glm::scale(glm::mat4(1.f), {0.1f, 0.1f, 0.1f}),
+					{x * distance, y * distance, z * distance }
+				);
+				renderables.push_back(renderable);
+			}
+		}
+	}
 
 	glClearColor(0.16f, 0.2f, 0.35f, 1.f);
 	while (!glfwWindowShouldClose(window))
@@ -760,30 +984,39 @@ int main()
 		lastTime = timeNow;
 
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		
 
 		camera.Update(dt);
 
-		glUseProgram(program);
+		glUseProgram(geoProgram);
 		glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 		glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
 
+		
+		// Indexed Drawing
 
-		renderer.Submit(a);
-		renderer.Submit(c);
-		renderer.Submit(b);
-		//renderer.Submit(c);
+		//for(auto& r  : renderables)
+		//{
+		//	renderer.DrawIndexed(window, r);
+		//}
+
+		// MDI
+		//for(auto& r  : renderables)
+		//{
+		//	renderer.Submit(r);
+		//}
+		//
+		//renderer.EndScene(window);
+
+		renderer.DrawIndexed(window, plane);
 
 
-
-
-		renderer.EndScene(window);
 		glUseProgram(0);
 
 
-		//glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-
 		glfwSwapBuffers(window);
 		glfwPollEvents();
+
 	}
 
 	glfwTerminate();
