@@ -568,7 +568,7 @@ public:
 		glBindVertexArray(m_VertexArray);
 
 		glMultiDrawElementsIndirect(
-			GL_TRIANGLES, 
+			GL_LINES_ADJACENCY, 
 			GL_UNSIGNED_INT, 
 			nullptr, 
 			drawCommands.size(),
@@ -602,7 +602,7 @@ public:
 		glBindVertexArray(m_VertexArray);
 		
 		glDrawElementsBaseVertex(
-			GL_POINTS, // todo
+			GL_LINES_ADJACENCY, // todo
 			geometry.elementCount,
 			GL_UNSIGNED_INT,
 			(const void*) (4 * geometry.firstIndex),
@@ -824,6 +824,48 @@ struct Sphere
 };
 
 
+void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	if(key == GLFW_KEY_9 && action == GLFW_PRESS)
+	{
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	}
+	if (key == GLFW_KEY_0 && action == GLFW_PRESS)
+	{
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	}
+}
+
+void PrintSupportedExtensions()
+{
+	GLint noExtensions = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &noExtensions);
+
+
+	for (int i = 0; i < noExtensions; i++)
+	{
+		std::cout << glGetStringi(GL_EXTENSIONS, i) << '\n';
+	}
+}
+
+bool IsExtensionSupported(const std::string& name)
+{
+	GLint noExtensions = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &noExtensions);
+
+	std::set<std::string> oglExtensions;
+	for (int i = 0; i < noExtensions; i++)
+	{
+		if(strcmp((const char*)glGetStringi(GL_EXTENSIONS, i), name.c_str()) == 0)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
 int main()
 {
 	if (glfwInit() != GLFW_TRUE)
@@ -847,10 +889,6 @@ int main()
 	}
 
 	glfwMakeContextCurrent(window);
-	glfwSetWindowCloseCallback(window, windowCloseFun);
-	glfwSetWindowSizeCallback(window, WindowSizeCallback);
-	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-	glfwSwapInterval(1);
 
 	if (GLEW_OK != glewInit())
 	{
@@ -859,125 +897,48 @@ int main()
 		abort();
 	}
 
+
+	//GLFW Settings
+	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+	glfwSwapInterval(1);
+
+	//GLFW Callbacks
+	glfwSetWindowCloseCallback(window, windowCloseFun);
+	glfwSetWindowSizeCallback(window, WindowSizeCallback);
+	glfwSetKeyCallback(window, KeyCallback);
+
+
+	//OpenGL Setup
 	glDebugMessageCallback(DebugCallback, 0);
 	glEnable(GL_DEPTH_TEST);
-	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	//glEnable(GL_CULL_FACE);
 
-
-	GLint noExtensions = 0;
-	glGetIntegerv(GL_NUM_EXTENSIONS, &noExtensions);
-
-	std::set<std::string> oglExtensions;
-	for(int i = 0; i < noExtensions; i++)
-	{
-		oglExtensions.insert((const char*)glGetStringi(GL_EXTENSIONS, i));
-	}
-	bool isSupported = oglExtensions.find("GL_ARB_bindless_texture") != oglExtensions.end();
-	
 	SharedContext sharedContext{};
 	glfwSetWindowUserPointer(window, &sharedContext);
-	
+
 	int w, h;
 	glfwGetWindowSize(window, &w, &h);
-	Camera camera((float)w/h);
+	Camera camera((float)w / h);
 	sharedContext.worldCamera = &camera;
 
 	GeometryManager geometryManager;
 	sharedContext.geometryManager = &geometryManager;
 
 
-	const char* vertexShaderText =
-		"#version 460\n"
-		"layout(location = 0) in vec3 a_Position;\n"
-		"layout(location = 1) in mat4 a_ModelMat;\n"
-		"uniform mat4 u_ViewMat;\n"
-		"uniform mat4 u_PerspectiveMat;\n"
-		"out mat4 gsModelMat;\n"
-		"void main()\n"
-		"{\n"
-		"gsModelMat = a_ModelMat;\n"
-		//"gl_Position = u_PerspectiveMat * u_ViewMat * a_ModelMat * vec4(a_Position, 1.0);\n"
-		"gl_Position = vec4(a_Position, 1.0);\n"
-		"}";
 
-	//
-
-
-	// TODO ModelMat wieder einfügen
-
-
-	const char* fragmentShaderText =
-		"#version 460\n"
-		"out vec4 color;"
-		"\n"
-		"void main()\n"
-		"{\n"
-		"color = vec4(1,1,0, 1.0);\n"
-		"}\n";
-
-
-
-	const char* geoShaderText =
-		"#version 460\n"
-		"layout(points) in;\n"
-		"layout(triangle_strip, max_vertices=4) out;\n"
-		"in mat4 gsModelMat[];\n"
-		"uniform mat4 u_ViewMat;\n"
-		"uniform mat4 u_PerspectiveMat;\n"
-		"void main()\n"
-		"{\n"
-		"vec4 offset = vec4(-0.25, 0.25, 0.0, 0.0);\n" // oben links
-		"vec4 vertexPos = offset + gl_in[0].gl_Position;\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
-		"EmitVertex();\n"
-		"\n"
-		"offset = vec4(0.25, 0.25, 0.0, 0.0);\n" // oben rechts
-		"vertexPos = offset + gl_in[0].gl_Position;\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
-		"EmitVertex();\n"
-		"\n"
-		"offset = vec4(-0.25, -0.25, 0.0, 0.0);\n" // unten links
-		"vertexPos = offset + gl_in[0].gl_Position;\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
-		"EmitVertex();\n"
-		"\n"
-		"offset = vec4(0.25, -0.25, 0.0, 0.0);\n" // unten rechts
-		"vertexPos = offset + gl_in[0].gl_Position;\n"
-		"gl_Position = u_PerspectiveMat * u_ViewMat * gsModelMat[0] * vertexPos;\n"
-		"EmitVertex();\n"
-		"EmitVertex();\n"
-		"EndPrimitive();\n"
-		"}\n";
-	
 	GLuint geoProgram = ShaderLoader::CreateProgram({
 		"assets/shaders/basicVert.vs",
 		"assets/shaders/basicFrag.fs",
-		"assets/shaders/pointToSquareGeo.gs",
-	});
+		"assets/shaders/pointsToSquare.gs",
+		});
 
-	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vertexShader, 1, &vertexShaderText, NULL);
-	glCompileShader(vertexShader);
+	GLuint smoothSurfaceProgram = ShaderLoader::CreateProgram({
+				"assets/shaders/basicVert.vs",
+		"assets/shaders/basicFrag.fs",
+		"assets/shaders/smoothSurface.gs",
 
-	GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fragmentShader, 1, &fragmentShaderText, NULL);
-	glCompileShader(fragmentShader);
+		});
 
-	GLuint program = glCreateProgram();
-	glAttachShader(program, vertexShader);
-	glAttachShader(program, fragmentShader);
-	glLinkProgram(program);
-
-	GLuint geoShader = glCreateShader(GL_GEOMETRY_SHADER);
-	glShaderSource(geoShader, 1, &geoShaderText, NULL);
-	glCompileShader(geoShader);
-
-	//GLuint geoProgram = glCreateProgram();
-	//glAttachShader(geoProgram, vertexShader);
-	//glAttachShader(geoProgram, fragmentShader);
-	//glAttachShader(geoProgram, geoShader);
-	//glLinkProgram(geoProgram);
 
 
 	float Geo1[] = {
@@ -988,18 +949,22 @@ int main()
 
 	uint32_t Geo1Indices[] = { 0,1,2 };
 
-	float trianglePositions[] = {
-		-0.5f, -0.5f, 0.0f,
-		 0.5f, -0.5f, 0.0f,
-		 0.5f,  0.5f, 0.0f,
-		-0.5f,  0.5f, 0.0f
+	float quadPositions[] = {
+		-0.5f, -0.5f, 0.0f, // ul
+		 0.5f, -0.5f, 0.0f, // ur
+		-0.5f,  0.5f, 0.0f, // ol
+		 0.5f,  0.5f, 0.0f  // or
 	};
 
-	uint32_t triangleIndices[] = {
+	uint32_t quadIndices[] = {
 		0,1,2,
-		0,2,3
+		1,2,3
 	};
 
+	uint32_t quadLinestripIndices[] =
+	{
+		0,1,2,3
+	};
 
 	float fuenfeck[] = {
 		 0.0f,  0.5f, 0.0f,
@@ -1033,26 +998,29 @@ int main()
 		1,5,6,1,6,2, // links
 		4,5,1,4,1,0, // oben
 		3,2,6,3,6,7
-
 	};
 
 	Sphere sphere30(10);
 
-	geometryManager.AddGeometry("square", trianglePositions, sizeof(trianglePositions), triangleIndices, sizeof(triangleIndices) / sizeof(GLuint));
+	geometryManager.AddGeometry("square", quadPositions, sizeof(quadPositions), quadIndices, sizeof(quadIndices) / sizeof(GLuint));
+	geometryManager.AddGeometry("quadLinestrip", quadPositions, sizeof(quadPositions), quadLinestripIndices, sizeof(quadLinestripIndices) / sizeof(uint32_t));
 	geometryManager.AddGeometry("triangle", Geo1, sizeof(Geo1), Geo1Indices, sizeof(Geo1Indices) / sizeof(GLuint));
 	geometryManager.AddGeometry("fuenfeck", fuenfeck, sizeof(fuenfeck), fuenfeckIndices, sizeof(fuenfeckIndices) / sizeof(GLuint));
 	geometryManager.AddGeometry("simpleCube", simpleCube, sizeof(simpleCube), simpleCubeIndices, sizeof(simpleCubeIndices) / sizeof(GLuint));
 	geometryManager.AddGeometry("sphere30", sphere30.m_Vertices.data(), sphere30.m_Vertices.size() * sizeof(float), sphere30.m_Indices.data(), sphere30.m_Vertices.size() * sizeof(uint32_t));
 
-	GLint viewMatLoc = glGetUniformLocation(geoProgram, "u_ViewMat");
-	GLint perspectiveMatLoc = glGetUniformLocation(geoProgram, "u_PerspectiveMat");
+	GLint viewMatLoc = glGetUniformLocation(smoothSurfaceProgram, "u_ViewMat");
+	GLint perspectiveMatLoc = glGetUniformLocation(smoothSurfaceProgram, "u_PerspectiveMat");
+	GLint stepsLoc = glGetUniformLocation(smoothSurfaceProgram, "uSteps");
+	GLint timeLoc = glGetUniformLocation(smoothSurfaceProgram, "uTime");
 
 	
 	
-	glUseProgram(geoProgram);
+	glUseProgram(smoothSurfaceProgram);
 	//glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, glm::value_ptr(identity));
 	glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 	glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
+	glUniform1i(stepsLoc, 9);
 	glUseProgram(0);
 
 
@@ -1077,20 +1045,24 @@ int main()
 	cube.geoID = sharedContext.geometryManager->GetID("simpleCube");
 	cube.modelTransform = glm::mat4(1.f);
 
+	Renderable quadLinestrip;
+	quadLinestrip.geoID = sharedContext.geometryManager->GetID("quadLinestrip");
+	quadLinestrip.modelTransform = glm::scale(glm::mat4(1.f), {5.f, 1.f, 1.f});
+
 	Renderer renderer;
 	renderer.SetVertexBuffer(sharedContext.geometryManager->GetVertexBufferID());
 	renderer.SetElementBuffer(sharedContext.geometryManager->GetElementBufferID());
 	renderer.SetGeoCount(sharedContext.geometryManager->GetGeoCount());
 
-	constexpr uint32_t gridsize = 22;
-	constexpr uint32_t distance = 80;
+	constexpr uint32_t gridsize = 5;
+	constexpr uint32_t distance = 5;
 	
 
 	std::vector<Renderable> renderables;
 	renderables.reserve(gridsize* gridsize* gridsize);
 
 
-	GeoID geoID = sharedContext.geometryManager->GetID("sphere30");
+	GeoID geoID = sharedContext.geometryManager->GetID("quadLinestrip");
 	for(int x = 0; x < gridsize; x++)
 	{
 		for(int y = 0; y < gridsize; y++)
@@ -1099,10 +1071,8 @@ int main()
 			{
 				Renderable renderable{};
 				renderable.geoID = geoID;
-				renderable.modelTransform = glm::translate(
-					glm::scale(glm::mat4(1.f), {0.1f, 0.1f, 0.1f}),
-					{x * distance, y * distance, z * distance }
-				);
+				renderable.modelTransform = glm::translate(glm::scale(glm::mat4(1.f), { 4.f, 0.5f, 0.5f }), { x * distance, y * distance, z * distance });
+
 				renderables.push_back(renderable);
 			}
 		}
@@ -1122,10 +1092,10 @@ int main()
 
 		camera.Update(dt);
 
-		glUseProgram(geoProgram);
+		glUseProgram(smoothSurfaceProgram);
 		glUniformMatrix4fv(viewMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetViewMatrix()));
 		glUniformMatrix4fv(perspectiveMatLoc, 1, GL_FALSE, glm::value_ptr(camera.GetPerspectiveMatrix()));
-
+		glUniform1d(timeLoc, timeNow);
 		
 		// Indexed Drawing
 
@@ -1135,14 +1105,14 @@ int main()
 		//}
 
 		// MDI
-		//for(auto& r  : renderables)
-		//{
-		//	renderer.Submit(r);
-		//}
-		//
-		//renderer.EndScene(window);
+		for(auto& r  : renderables)
+		{
+			renderer.Submit(r);
+		}
+		
+		renderer.EndScene(window);
 
-		renderer.DrawIndexed(window, plane);
+		//renderer.DrawIndexed(window, quadLinestrip);
 
 
 		glUseProgram(0);
@@ -1155,7 +1125,7 @@ int main()
 
 	glfwTerminate();
 
-
+	
 
 	return 0;
 }
